@@ -1,0 +1,217 @@
+---
+title: "R Notebook"
+---
+
+```{r setup}
+library(tidyverse)
+library(imager)
+```
+
+
+```{r}
+# img <- imager::load.image("~/../Downloads/1-1440x678.jpg") %>%
+#   as.array()
+img <- imager::load.image("~/../Downloads/1-1440x678.jpg") %>%
+  as.array()
+
+img %>%
+  imager::as.cimg() %>%
+  as.data.frame() %>%
+  filter(cc != 4) %>%
+  pivot_wider(id_cols = c(x,y),names_from = cc,values_from = value) %>%
+  mutate(red = `1`*255,
+         green = `2`*255,
+         blue = `3`*255) %>%
+  mutate(hex = rgb(red = red,green = green,blue = blue,maxColorValue = 255)) %>%
+  ggplot(aes(x=x,y=y,fill=hex)) +
+  geom_raster() +
+  coord_fixed(expand = FALSE) +
+  scale_fill_identity() +
+  scale_y_reverse() +
+  theme_void()
+```
+
+## Using K-means to identify color cluster centers
+
+```{r}
+imDim <- expand_grid(row = 1:dim(img)[1],
+                     col = 1:dim(img)[2])%>%
+  mutate(red = c(img[,,,1])*255,
+         green = c(img[,,,2])*255,
+         blue = c(img[,,,3])*255)
+
+imClust <- imDim %>%
+  select(-c(row,col)) %>%
+  kmeans(centers = 5)
+
+# imDim <- 
+# imDim %>%
+#   mutate(clust = imClust$cluster)
+
+imColorBlock <- imClust$cluster %>%
+  matrix(nrow = dim(img)[1],ncol = dim(img)[2]) %>%
+  imager::as.cimg() %>%
+  as.data.frame()  %>%
+  rename(clust = value) %>%
+  left_join(imClust$centers %>%
+              as.data.frame() %>%
+              rownames_to_column(var = "clust") %>%
+              mutate(clust = as.integer(clust)) %>%
+              rename(centerRed = red,
+                     centerGreen = green,
+                     centerBlue = blue),
+            by = "clust") %>%
+  mutate(centerHex = rgb(red = round(centerRed),
+                         green = round(centerGreen),
+                         blue = round(centerBlue),
+                         maxColorValue = 255)) 
+
+imColorBlock %>%
+  ggplot(aes(x=x,y=y,fill=centerHex)) +
+  geom_raster() +
+  coord_fixed(expand = FALSE) +
+  scale_fill_identity() +
+  scale_y_reverse()
+```
+
+### Attempting to remove speckle using erosion/dilation
+
+```{r}
+imClustIden <- imColorBlock %>%
+  select(x,y,clust) %>%
+  bind_cols(map_dfc(1:unique(imColorBlock$clust),
+                    function(clustNum){
+                      
+                      data.frame(z = ifelse(imColorBlock$clust == clustNum,1,0)) %>%
+                        set_names(paste0("clust",clustNum))
+                      
+                    }))
+
+blankIm <- imager::as.cimg(matrix(0,nrow = dim(img)[1],ncol = dim(img)[2]))
+
+map(1:unique(imColorBlock$clust),
+    function(clustNum){
+      
+      ret <- imColorBlock %>%
+        mutate(value = ifelse(clust == clustNum,1,0)) %>%
+        select(x,y,value) %>%
+        imager::as.cimg() %>%
+        dilate_rect(sx = 10,sy = 10) %>%
+        # erode_rect(sx = 10,sy = 10) %>%
+        as.data.frame() %>%
+        mutate(value = ifelse(value == 1,clustNum + 5,0)) %>%
+        as.cimg() %>%
+        label() %>%
+        as.data.frame() 
+      
+      topLabs <- ret %>%
+        group_by(value) %>%
+        tally(sort = TRUE) %>%
+        top_n(n = 2,wt = n) %>%
+        pull(value)
+      
+      ret %>%
+        mutate(value = factor(ifelse(value %in% topLabs,value,-1))) %>%
+        ggplot(aes(x=x,y=y,fill=value)) +
+        geom_raster() +
+        coord_fixed(expand = FALSE) +
+        # scale_fill_identity() +
+        scale_y_reverse()
+      
+    })
+```
+
+## Using changes in image gradient
+
+```{r}
+imLabeled <- map2_dfr(1:3,
+                      c("red","green","blue"),
+                      function(dimNum,dimName){
+                        
+                        imgLabeled <- img[,,,dimNum] %>%
+                          imager::as.cimg() %>%
+                          # imgradient() %c>%
+                          cannyEdges() %>%
+                          imager::dilate_square(size = 3) %>%
+                          imager::label() %>%
+                          as.data.frame() %>%
+                          mutate(dimLabel = paste0(dimName,"-",value))
+                        
+                        # topLabel <- imgLabeled %>%
+                        #   group_by(value) %>%
+                        #   tally(sort = TRUE) %>%
+                        #   top_n(n = 5,wt = n) %>%
+                        #   pull(value)
+                        
+                        # imgLabeled %>%
+                        #   mutate(value = factor(ifelse(value %in% topLabel,value,-1))) %>%
+                        # ggplot(aes(x=x,y=y,fill=value)) +
+                        # geom_raster() +
+                        # coord_fixed(expand = FALSE) +
+                        # scale_y_reverse()
+                        
+                      })
+
+topLabels <- imLabeled %>%
+  group_by(dimLabel) %>%
+  tally(sort = TRUE) %>%
+  top_n(n = 10,wt = n) %>%
+  select(-n) %>%
+  pull(dimLabel)
+
+imLabeled
+
+%>%
+  mutate(value = factor(ifelse(dimLabel %in% topLabels,value,-1))) %>%
+  ggplot(aes(x=x,y=y,fill=value)) +
+  geom_raster() +
+  coord_fixed(expand = FALSE) +
+  scale_y_reverse()
+```
+
+```{r}
+imLabeled %>%
+  as.data.frame() %>%
+  mutate(value = factor(ifelse(value %in% topLabels,value,-1))) %>%
+  ggplot(aes(x=x,y=y,fill=value)) +
+  geom_raster() +
+  coord_fixed(expand = FALSE) +
+  scale_y_reverse()
+```
+
+
+```{r}
+map(1:3,
+    function(dimNum){
+      
+      imLabeled <- c %>%
+        imager::threshold(thr = "99%") %>%
+        imager::dilate_square(size = 10) %>%
+        imager::label() %>%
+        as.data.frame()
+      
+      topLabels <- imLabeled %>%
+        group_by(value) %>%
+        tally() %>%
+        top_n(n = 5,wt = n) %>%
+        pull(value)
+      
+      imLabeled %>%
+        mutate(value = ifelse(value %in% topLabels,value,-1)) %>%
+        imager::as.cimg() %>%
+        plot()
+      
+      
+    })
+
+img %>%
+  imager::as.cimg() %>%
+  imager::grayscale() %>%
+  imager::imgradient() %>%
+  enorm() %>%
+  imager::threshold(thr = "99%") %>%
+  imager::dilate_square(size = 3) %>%
+  imager::label() %>%
+  plot()
+```
+
